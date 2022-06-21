@@ -7,6 +7,7 @@ import org.neo4j.graphdb.QueryExecutionType;
 import org.neo4j.graphdb.Result;
 import org.neo4j.internal.helpers.collection.Iterables;
 import org.neo4j.internal.kernel.api.exceptions.ProcedureException;
+import org.neo4j.internal.kernel.api.procs.DefaultParameterValue;
 import org.neo4j.internal.kernel.api.procs.ProcedureSignature;
 import org.neo4j.internal.kernel.api.procs.UserFunctionSignature;
 import org.neo4j.internal.kernel.api.procs.FieldSignature;
@@ -23,9 +24,11 @@ import org.neo4j.procedure.Mode;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -172,12 +175,12 @@ public class CypherProcedures {
     }
     
     private void validateProcedure(String statement, List<FieldSignature> input, List<FieldSignature> output, Mode mode) {
-        
-        final Set<String> inputSet = input.stream().map(FieldSignature::name).collect(Collectors.toSet());
+
         final Set<String> outputSet = output.stream().map(FieldSignature::name).collect(Collectors.toSet());
 
-        api.executeTransactionally("EXPLAIN " + statement, 
-                inputSet.stream().collect(Collectors.toMap(i -> i, i -> i)),
+        api.executeTransactionally("EXPLAIN " + statement,
+                input.stream().collect(HashMap::new, 
+                                (map, value) -> map.put(value.name(), null), HashMap::putAll),
                 result -> {
                     if (!DEFAULT_MAP_OUTPUT.equals(output)) {
                         checkOutputParams(outputSet, result.columns());
@@ -229,7 +232,8 @@ public class CypherProcedures {
             List<String> list = new ArrayList<>(3);
             list.add(f.name());
             list.add(prettyPrintType(f.neo4jType()));
-            f.defaultValue().ifPresent(v -> list.add(v.value().toString()));
+            final Optional<DefaultParameterValue> defaultParameterValue = f.defaultValue();
+            defaultParameterValue.map(DefaultParameterValue::value).ifPresent(v -> list.add(v.toString()));
             return list;
         }, signatures));
     }

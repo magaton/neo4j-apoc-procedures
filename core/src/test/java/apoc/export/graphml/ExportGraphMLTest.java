@@ -2,6 +2,9 @@ package apoc.export.graphml;
 
 import apoc.ApocSettings;
 import apoc.graph.Graphs;
+import apoc.util.BinaryTestUtil;
+import apoc.util.CompressionAlgo;
+import apoc.util.CompressionConfig;
 import apoc.util.TestUtil;
 import apoc.util.Util;
 import junit.framework.TestCase;
@@ -12,10 +15,11 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TestName;
 import org.neo4j.configuration.GraphDatabaseSettings;
-import org.neo4j.graphdb.Label;
 import org.neo4j.graphdb.Node;
 import org.neo4j.graphdb.QueryExecutionException;
 import org.neo4j.graphdb.Relationship;
+import org.neo4j.graphdb.ResourceIterator;
+import org.neo4j.internal.helpers.collection.Iterables;
 import org.neo4j.test.rule.DbmsRule;
 import org.neo4j.test.rule.ImpermanentDbmsRule;
 import org.xmlunit.builder.DiffBuilder;
@@ -28,13 +32,17 @@ import javax.xml.namespace.QName;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileWriter;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static apoc.ApocConfig.APOC_EXPORT_FILE_ENABLED;
 import static apoc.ApocConfig.APOC_IMPORT_FILE_ENABLED;
+import static apoc.ApocConfig.EXPORT_TO_FILE_ERROR;
 import static apoc.ApocConfig.apocConfig;
+import static apoc.util.BinaryTestUtil.getDecompressedData;
 import static apoc.util.MapUtil.map;
 import static apoc.util.TestUtil.isRunningInCI;
 import static org.junit.Assert.assertEquals;
@@ -45,6 +53,7 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.assumeFalse;
 import static org.neo4j.configuration.GraphDatabaseSettings.TransactionStateMemoryAllocation.OFF_HEAP;
 import static org.neo4j.configuration.SettingValueParsers.BYTES;
+import static org.neo4j.graphdb.Label.label;
 import static org.xmlunit.diff.ElementSelectors.byName;
 
 /**
@@ -68,6 +77,13 @@ public class ExportGraphMLTest {
             "<key id=\"place\" for=\"node\" attr.name=\"place\"/>%n" +
             "<key id=\"age\" for=\"node\" attr.name=\"age\"/>%n" +
             "<key id=\"label\" for=\"edge\" attr.name=\"label\"/>%n";
+    public static final String KEY_TYPES_FALSE_TINKER = "<key id=\"born\" for=\"node\" attr.name=\"born\"/>%n" +
+            "<key id=\"name\" for=\"node\" attr.name=\"name\"/>%n" +
+            "<key id=\"labelV\" for=\"node\" attr.name=\"labelV\"/>%n"+
+            "<key id=\"place\" for=\"node\" attr.name=\"place\"/>%n" +
+            "<key id=\"age\" for=\"node\" attr.name=\"age\"/>%n" +
+            "<key id=\"values\" for=\"node\" attr.name=\"values\"/>" +
+            "<key id=\"labelE\" for=\"edge\" attr.name=\"labelE\"/>%n";        
     public static final String KEY_TYPES_DATA = "<key id=\"name\" for=\"node\" attr.name=\"name\"/>\n" +
             "<key id=\"labels\" for=\"node\" attr.name=\"labels\"/>";
     public static final String KEY_TYPES = "<key id=\"born\" for=\"node\" attr.name=\"born\" attr.type=\"string\"/>%n" +
@@ -85,6 +101,12 @@ public class ExportGraphMLTest {
             "<key id=\"age\" for=\"node\" attr.name=\"age\" attr.type=\"long\"/>%n" +
             "<key id=\"label\" for=\"edge\" attr.name=\"label\" attr.type=\"string\"/>%n" +
             "<key id=\"TYPE\" for=\"edge\" attr.name=\"TYPE\" attr.type=\"string\"/>%n";
+    public static final String KEY_TYPES_PATH_TINKERPOP = "<key id=\"born\" for=\"node\" attr.name=\"born\" attr.type=\"string\"/>%n" +
+            "<key id=\"name\" for=\"node\" attr.name=\"name\" attr.type=\"string\"/>%n" +
+            "<key id=\"labelV\" for=\"node\" attr.name=\"labelV\" attr.type=\"string\"/>%n"+
+            "<key id=\"place\" for=\"node\" attr.name=\"place\" attr.type=\"string\"/>%n" +
+            "<key id=\"age\" for=\"node\" attr.name=\"age\" attr.type=\"long\"/>%n" +
+            "<key id=\"labelE\" for=\"edge\" attr.name=\"labelE\" attr.type=\"string\"/>%n";
     public static final String KEY_TYPES_CAMEL_CASE = "<key id=\"firstName\" for=\"node\" attr.name=\"firstName\" attr.type=\"string\"/>%n" +
             "<key id=\"ageNow\" for=\"node\" attr.name=\"ageNow\" attr.type=\"long\"/>%n" +
             "<key id=\"name\" for=\"node\" attr.name=\"name\" attr.type=\"string\"/>%n" +
@@ -98,6 +120,10 @@ public class ExportGraphMLTest {
             "<node id=\"n1\" labels=\":Bar\"><data key=\"labels\">:Bar</data><data key=\"age\">42</data><data key=\"name\">bar</data><data key=\"place\">{\"crs\":\"wgs-84\",\"latitude\":12.78,\"longitude\":56.7,\"height\":null}</data></node>%n" +
             "<node id=\"n2\" labels=\":Bar\"><data key=\"labels\">:Bar</data><data key=\"age\">12</data><data key=\"values\">[1,2,3]</data></node>%n" +
             "<edge id=\"e0\" source=\"n0\" target=\"n1\" label=\"KNOWS\"><data key=\"label\">KNOWS</data></edge>%n";
+    public static final String DATA_TINKER = "<node id=\"n0\"><data key=\"labelV\">Foo:Foo0:Foo2</data><data key=\"place\">{\"crs\":\"wgs-84-3d\",\"latitude\":12.78,\"longitude\":56.7,\"height\":100.0}</data><data key=\"name\">foo</data><data key=\"born\">2018-10-10</data></node>%n" +
+            "<node id=\"n1\"><data key=\"labelV\">Bar</data><data key=\"age\">42</data><data key=\"name\">bar</data><data key=\"place\">{\"crs\":\"wgs-84\",\"latitude\":12.78,\"longitude\":56.7,\"height\":null}</data></node>%n" +
+            "<node id=\"n2\"><data key=\"labelV\">Bar</data><data key=\"age\">12</data><data key=\"values\">[1,2,3]</data></node>%n" +
+            "<edge id=\"e0\" source=\"n0\" target=\"n1\"><data key=\"labelE\">KNOWS</data></edge>%n";
     public static final String DATA_CAMEL_CASE =
             "<node id=\"n0\" labels=\":Foo:Foo0:Foo2\"><data key=\"TYPE\">:Foo:Foo0:Foo2</data><data key=\"label\">foo</data><data key=\"firstName\">foo</data></node>%n" +
             "<node id=\"n1\" labels=\":Bar\"><data key=\"TYPE\">:Bar</data><data key=\"label\">bar</data><data key=\"name\">bar</data><data key=\"ageNow\">42</data></node>%n" +
@@ -129,6 +155,10 @@ public class ExportGraphMLTest {
     public static final String DATA_PATH_CAPTION = "<node id=\"n0\" labels=\":Foo:Foo0:Foo2\"><data key=\"TYPE\">:Foo:Foo0:Foo2</data><data key=\"label\">foo</data><data key=\"place\">{\"crs\":\"wgs-84-3d\",\"latitude\":12.78,\"longitude\":56.7,\"height\":100.0}</data><data key=\"name\">foo</data><data key=\"born\">2018-10-10</data></node>%n" +
             "<node id=\"n1\" labels=\":Bar\"><data key=\"TYPE\">:Bar</data><data key=\"label\">bar</data><data key=\"age\">42</data><data key=\"name\">bar</data><data key=\"place\">{\"crs\":\"wgs-84\",\"latitude\":12.78,\"longitude\":56.7,\"height\":null}</data></node>%n" +
             "<edge id=\"e0\" source=\"n0\" target=\"n1\" label=\"KNOWS\"><data key=\"label\">KNOWS</data><data key=\"TYPE\">KNOWS</data></edge>%n";
+    
+    public static final String DATA_PATH_CAPTION_TINKER = "<node id=\"n0\"><data key=\"labelV\">Foo:Foo0:Foo2</data><data key=\"place\">{\"crs\":\"wgs-84-3d\",\"latitude\":12.78,\"longitude\":56.7,\"height\":100.0}</data><data key=\"name\">foo</data><data key=\"born\">2018-10-10</data></node>%n" +
+            "<node id=\"n1\"><data key=\"labelV\">Bar</data><data key=\"age\">42</data><data key=\"name\">bar</data><data key=\"place\">{\"crs\":\"wgs-84\",\"latitude\":12.78,\"longitude\":56.7,\"height\":null}</data></node>%n" +
+            "<edge id=\"e0\" source=\"n0\" target=\"n1\"><data key=\"labelE\">KNOWS</data></edge>%n";
 
     public static final String DATA_PATH_CAPTION_DEFAULT = "<node id=\"n0\" labels=\":Foo:Foo0:Foo2\"><data key=\"TYPE\">:Foo:Foo0:Foo2</data><data key=\"label\">foo</data><data key=\"place\">{\"crs\":\"wgs-84-3d\",\"latitude\":12.78,\"longitude\":56.7,\"height\":100.0}</data><data key=\"name\">foo</data><data key=\"born\">2018-10-10</data></node>%n" +
             "<node id=\"n1\" labels=\":Bar\"><data key=\"TYPE\">:Bar</data><data key=\"label\">bar</data><data key=\"age\">42</data><data key=\"name\">bar</data><data key=\"place\">{\"crs\":\"wgs-84\",\"latitude\":12.78,\"longitude\":56.7,\"height\":null}</data></node>%n" +
@@ -139,10 +169,12 @@ public class ExportGraphMLTest {
 
     private static final String EXPECTED_TYPES_PATH = String.format(HEADER + KEY_TYPES_PATH + GRAPH + DATA_PATH + FOOTER);
     private static final String EXPECTED_TYPES_PATH_CAPTION = String.format(HEADER + KEY_TYPES_PATH + GRAPH + DATA_PATH_CAPTION + FOOTER);
+    private static final String EXPECTED_TYPES_PATH_CAPTION_TINKER = String.format(HEADER + KEY_TYPES_PATH_TINKERPOP + GRAPH + DATA_PATH_CAPTION_TINKER + FOOTER);
     private static final String EXPECTED_TYPES_PATH_WRONG_CAPTION = String.format(HEADER + KEY_TYPES_PATH + GRAPH + DATA_PATH_CAPTION_DEFAULT + FOOTER);
     private static final String EXPECTED_TYPES = String.format(HEADER + KEY_TYPES + GRAPH + DATA + FOOTER);
     private static final String EXPECTED_TYPES_WITHOUT_CHAR_DATA_KEYS = String.format(HEADER + KEY_TYPES  + GRAPH + DATA_WITHOUT_CHAR_DATA_KEYS + FOOTER);
     private static final String EXPECTED_FALSE = String.format(HEADER + KEY_TYPES_FALSE + GRAPH + DATA + FOOTER);
+    private static final String EXPECTED_TINKER = String.format(HEADER + KEY_TYPES_FALSE_TINKER + GRAPH + DATA_TINKER + FOOTER);
     private static final String EXPECTED_DATA = String.format(HEADER + KEY_TYPES_DATA + GRAPH + DATA_DATA + FOOTER);
     private static final String EXPECTED_READ_NODE_EDGE = String.format(HEADER + GRAPH + DATA_NODE_EDGE + FOOTER);
     private static final String EXPECTED_TYPES_PATH_CAMEL_CASE = String.format(HEADER + KEY_TYPES_CAMEL_CASE + GRAPH + DATA_CAMEL_CASE + FOOTER);
@@ -193,6 +225,91 @@ public class ExportGraphMLTest {
                 });
 
         TestUtil.testCall(db, "MATCH  (c:Bar {age: 12, values: [1,2,3]}) RETURN COUNT(c) AS c", null, (r) -> assertEquals(1L, r.get("c")));
+    }
+    
+    @Test
+    public void testRoundTripWithSeparatedImport() {
+        Map<String, Object> exportConfig = map("useTypes", true);
+
+        Map<String, Object> importConfig = map("readLabels", true, "storeNodeIds", true,
+                "source", map("label", "Foo"),
+                "target", map("label", "Bar"));
+
+        // we didn't specified a source/target in export config
+        // so we have to store the nodeIds and looking for them during relationship import
+        separatedFileCommons(exportConfig, importConfig);
+    }
+
+    @Test
+    public void testImportSeparatedFilesWithCustomId() {
+        Map<String, Object> exportConfig = map("useTypes", true,
+                "source", map("id", "name"), 
+                "target", map("id", "age"));
+        
+        Map<String, Object> importConfig = map("readLabels", true,
+                "source", map("label", "Foo", "id", "name"), 
+                "target", map("label", "Bar", "id", "age"));
+        
+        // we specified a source/target in export config
+        // so storeNodeIds config is unnecessary and we search nodes by properties Foo.name and Bar.age
+        separatedFileCommons(exportConfig, importConfig);
+    }
+
+    private void separatedFileCommons(Map<String, Object> exportConfig, Map<String, Object> importConfig) {
+        db.executeTransactionally("CREATE (:Foo {name: 'zzz'})-[:KNOWS]->(:Bar {age: 0}), (:Foo {name: 'aaa'})-[:KNOWS {id: 1}]->(:Bar {age: 666})");
+
+        // we export 3 files: 1 for source nodes, 1 for end nodes, 1 for relationships
+        String outputNodesFoo = new File(directory, "queryNodesFoo.graphml").getAbsolutePath();
+        String outputNodesBar = new File(directory, "queryNodesBar.graphml").getAbsolutePath();
+        String outputRelationships = new File(directory, "queryRelationship.graphml").getAbsolutePath();
+
+        TestUtil.testCall(db, "CALL apoc.export.graphml.query('MATCH (start:Foo)-[:KNOWS]->(:Bar) RETURN start',$file, $config)",
+                map("file", outputNodesFoo, "config", exportConfig),
+                (r) -> assertEquals(3L, r.get("nodes")));
+
+        TestUtil.testCall(db, "CALL apoc.export.graphml.query('MATCH (:Foo)-[:KNOWS]->(end:Bar) RETURN end', $file, $config) ",
+                map("file", outputNodesBar, "config", exportConfig),
+                (r) -> assertEquals(3L, r.get("nodes")));
+
+        TestUtil.testCall(db, "MATCH (:Foo)-[rel:KNOWS]->(:Bar) WITH collect(rel) as rels \n" +
+                        "call apoc.export.graphml.data([], rels, $file, $config) " +
+                        "YIELD nodes, relationships RETURN nodes, relationships",
+                map("file", outputRelationships, "config", exportConfig),
+                (r) -> assertEquals(3L, r.get("relationships")));
+
+        // delete current entities and re-import
+        db.executeTransactionally("MATCH (n) DETACH DELETE n");
+
+        TestUtil.testCall(db, "CALL apoc.import.graphml($file, $config)",
+                map("file", outputNodesFoo, "config", importConfig),
+                (r) -> assertEquals(3L, r.get("nodes")));
+
+        TestUtil.testCall(db, "CALL apoc.import.graphml($file, $config)",
+                map("file", outputNodesBar, "config", importConfig),
+                (r) -> assertEquals(3L, r.get("nodes")));
+
+        TestUtil.testCall(db, "CALL apoc.import.graphml($file, $config)",
+                map("file", outputRelationships, "config", importConfig),
+                (r) -> assertEquals(3L, r.get("relationships")));
+
+        TestUtil.testResult(db, "MATCH (start:Foo)-[rel:KNOWS]->(end:Bar) \n" +
+                        "RETURN start.name AS startName, rel.id AS relId, end.age AS endAge \n" +
+                        "ORDER BY start.name",
+                (r) -> {
+                    Map<String, Object> row = r.next();
+                    assertions(row, "aaa", 1L, 666L);
+                    row = r.next();
+                    assertions(row, "foo", null, 42L);
+                    row = r.next();
+                    assertions(row, "zzz", null, 0L);
+                    assertFalse(r.hasNext());
+                });
+    }
+
+    private void assertions(Map<String, Object> row, String expectedSource, Long expectedRel, Long expectedTarget) {
+        assertEquals(expectedSource, row.get("startName"));
+        assertEquals(expectedRel, row.get("relId"));
+        assertEquals(expectedTarget, row.get("endAge"));
     }
 
     @Test
@@ -324,7 +441,7 @@ public class ExportGraphMLTest {
         });
         TestUtil.testCall(db, "MATCH (bar:BAR)-[knows:KNOWS]->(qwerty:QWERTY) RETURN bar, knows, qwerty", null, (r) -> {
             assertBar(((Node)r.get("bar")));
-            assertEquals(Arrays.asList(Label.label("QWERTY")), ((Node)r.get("qwerty")).getLabels());
+            assertEquals(Arrays.asList(label("QWERTY")), ((Node)r.get("qwerty")).getLabels());
             assertEquals(Util.map("name", "qwerty"), ((Node)r.get("qwerty")).getAllProperties());
             assertEquals("KNOWS", ((Relationship)r.get("knows")).getType().name());
         });
@@ -332,12 +449,12 @@ public class ExportGraphMLTest {
     }
 
     private void assertBar(Node node){
-        assertEquals(Arrays.asList(Label.label("BAR")), node.getLabels());
+        assertEquals(Arrays.asList(label("BAR")), node.getLabels());
         assertEquals(Util.map("name", "bar", "kids", "[a,b,c]"), node.getAllProperties());
     }
 
     private void assertFoo(Node node){
-        assertEquals(Arrays.asList(Label.label("FOO")), node.getLabels());
+        assertEquals(Arrays.asList(label("FOO")), node.getLabels());
         assertEquals(Util.map("name", "foo"), node.getAllProperties());
     }
 
@@ -367,6 +484,51 @@ public class ExportGraphMLTest {
         TestUtil.testCall(db, "CALL apoc.export.graphml.all($file,null)", map("file", output.getAbsolutePath()),
                 (r) -> assertResults(output, r, "database"));
         assertXMLEquals(output, EXPECTED_FALSE);
+    }
+
+    @Test
+    public void testExportAllGraphMLWithCompression() {
+        final CompressionAlgo algo = CompressionAlgo.DEFLATE;
+        File output = new File(directory, "all.graphml.zz");
+        TestUtil.testCall(db, "CALL apoc.export.graphml.all($file, $config)",
+                map("file", output.getAbsolutePath(), "config", map("compression", algo.name())),
+                (r) -> assertResults(output, r, "database"));
+        assertXMLEquals(BinaryTestUtil.readFileToString(output, StandardCharsets.UTF_8, algo), EXPECTED_FALSE);
+    }
+    
+    @Test
+    public void testGraphMlRoundtrip() {
+        final CompressionAlgo algo = CompressionAlgo.NONE;
+        File output = new File(directory, "all.graphml.zz");
+        final Map<String, Object> params = map("file", output.getAbsolutePath(), 
+                "config", map(CompressionConfig.COMPRESSION, algo.name(), "readLabels", true, "useTypes", true));
+        TestUtil.testCall(db, "CALL apoc.export.graphml.all($file, $config)", params, (r) -> assertResults(output, r, "database"));
+
+        db.executeTransactionally("MATCH (n) DETACH DELETE n");
+
+        TestUtil.testCall(db, "CALL apoc.import.graphml($file, $config) ", params,
+                r -> assertEquals(3L, r.get("nodes")));
+
+        TestUtil.testResult(db, "MATCH (n) RETURN n order by coalesce(n.name, '')", r -> {
+            final ResourceIterator<Node> iterator = r.columnAs("n");
+            final Node first = iterator.next();
+            assertEquals(12L, first.getProperty("age"));
+            assertFalse(first.hasProperty("name"));
+            assertEquals(List.of(label("Bar")), first.getLabels());
+
+            final Node second = iterator.next();
+            assertEquals(42L, second.getProperty("age"));
+            assertEquals("bar", second.getProperty("name"));
+            assertEquals(List.of(label("Bar")), second.getLabels());
+
+            final Node third = iterator.next();
+            assertFalse(third.hasProperty("age"));
+            assertEquals("foo", third.getProperty("name"));
+            assertEquals(Set.of(label("Foo"), label("Foo2"), label("Foo0")), Iterables.asSet(third.getLabels()));
+
+            assertFalse(iterator.hasNext());
+        });
+        
     }
 
     @Test
@@ -429,7 +591,7 @@ public class ExportGraphMLTest {
         } catch (QueryExecutionException e) {
             Throwable except = ExceptionUtils.getRootCause(e);
             TestCase.assertTrue(except instanceof RuntimeException);
-            assertEquals("Export to files not enabled, please set apoc.export.file.enabled=true in your apoc.conf", except.getMessage());
+            assertEquals(EXPORT_TO_FILE_ERROR, except.getMessage());
             throw e;
         }
     }
@@ -531,6 +693,70 @@ public class ExportGraphMLTest {
         assertXMLEquals(output, EXPECTED_TYPES_PATH_WRONG_CAPTION);
     }
 
+    @Test
+    public void testExportAllGraphMLTinker() throws Exception {
+        File output = new File(directory, "all.graphml");
+        TestUtil.testCall(db, "CALL apoc.export.graphml.all($file, {format:'tinkerpop'})", map("file", output.getAbsolutePath()),
+                (r) -> assertResults(output, r, "database"));
+        assertXMLEquals(output, EXPECTED_TINKER);
+    }
+
+    public void testExportGraphGraphMLQueryTinkerPop() throws Exception {
+        File output = new File(directory, "query.graphml");
+        TestUtil.testCall(db, "call apoc.export.graphml.query('MATCH p=()-[r]->() RETURN p limit 1000',$file,{useTypes:true, format: 'tinkerpop'}) ", map("file", output.getAbsolutePath()),
+                (r) -> {
+                    assertEquals(2L, r.get("nodes"));
+                    assertEquals(1L, r.get("relationships"));
+                    assertEquals(6L, r.get("properties"));
+                    assertEquals(output.getAbsolutePath(), r.get("file"));
+                    if (r.get("source").toString().contains(":"))
+                        assertEquals("statement" + ": nodes(2), rels(1)", r.get("source"));
+                    else
+                        assertEquals("file", r.get("source"));
+                    assertEquals("graphml", r.get("format"));
+                    assertTrue("Should get time greater than 0",((long) r.get("time")) > 0);
+                });
+        assertXMLEquals(output, EXPECTED_TYPES_PATH_CAPTION_TINKER);
+    }
+
+    @Test
+    public void testExportGraphGraphMLQueryTinkerPopWithArrayCaption() throws Exception {
+        File output = new File(directory, "query.graphml");
+        TestUtil.testCall(db, "call apoc.export.graphml.query('MATCH p=()-[r]->() RETURN p limit 1000',$file,{useTypes:true, format: 'tinkerpop', caption: ['bar','name','foo']}) ", map("file", output.getAbsolutePath()),
+                (r) -> {
+                    assertEquals(2L, r.get("nodes"));
+                    assertEquals(1L, r.get("relationships"));
+                    assertEquals(6L, r.get("properties"));
+                    assertEquals(output.getAbsolutePath(), r.get("file"));
+                    if (r.get("source").toString().contains(":"))
+                        assertEquals("statement" + ": nodes(2), rels(1)", r.get("source"));
+                    else
+                        assertEquals("file", r.get("source"));
+                    assertEquals("graphml", r.get("format"));
+                    assertTrue("Should get time greater than 0",((long) r.get("time")) > 0);
+                });
+        assertXMLEquals(output, EXPECTED_TYPES_PATH_CAPTION_TINKER);
+    }
+
+    @Test
+    public void testExportGraphGraphMLQueryTinkerPopWithArrayCaptionWrong() throws Exception {
+        File output = new File(directory, "query.graphml");
+        TestUtil.testCall(db, "call apoc.export.graphml.query('MATCH p=()-[r]->() RETURN p limit 1000',$file,{useTypes:true, format: 'tinkerpop', caption: ['c','d','e']}) ", map("file", output.getAbsolutePath()),
+                (r) -> {
+                    assertEquals(2L, r.get("nodes"));
+                    assertEquals(1L, r.get("relationships"));
+                    assertEquals(6L, r.get("properties"));
+                    assertEquals(output.getAbsolutePath(), r.get("file"));
+                    if (r.get("source").toString().contains(":"))
+                        assertEquals("statement" + ": nodes(2), rels(1)", r.get("source"));
+                    else
+                        assertEquals("file", r.get("source"));
+                    assertEquals("graphml", r.get("format"));
+                    assertTrue("Should get time greater than 0",((long) r.get("time")) > 0);
+                });
+        assertXMLEquals(output, EXPECTED_TYPES_PATH_CAPTION_TINKER);
+    }
+
     @Test(expected = QueryExecutionException.class)
     public void testExportGraphGraphMLQueryGephiWithStringCaption() throws Exception {
         File output = new File(directory, "query.graphml");
@@ -597,6 +823,17 @@ public class ExportGraphMLTest {
                 (r) -> {
                     assertStreamResults(r, "database");
                     assertXMLEquals(r.get("data"), EXPECTED_FALSE);
+                });
+    }
+
+    @Test
+    public void testExportAllGraphMLStreamWithCompression() {
+        final CompressionAlgo algo = CompressionAlgo.BZIP2;
+        TestUtil.testCall(db, "CALL apoc.export.graphml.all(null, $config)",
+                map("config", map("compression", algo.name(), "stream", true)),
+                (r) -> { 
+                    assertStreamResults(r, "database");
+                    assertXMLEquals(getDecompressedData(algo, r.get("data")), EXPECTED_FALSE);
                 });
     }
 }
